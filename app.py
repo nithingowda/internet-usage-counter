@@ -3,7 +3,7 @@ import time
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template, request
 
@@ -77,6 +77,14 @@ def init_db():
             reset_rx INTEGER NOT NULL DEFAULT 0, reset_tx INTEGER NOT NULL DEFAULT 0,
             month_key TEXT NOT NULL, month_rx INTEGER NOT NULL DEFAULT 0,
             month_tx INTEGER NOT NULL DEFAULT 0, updated_at TEXT, reset_at TEXT)''')
+        con.execute('''CREATE TABLE IF NOT EXISTS usage_samples (
+            interface TEXT NOT NULL, timestamp REAL NOT NULL,
+            rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0)''')
+        con.execute('''CREATE TABLE IF NOT EXISTS usage_daily (
+            interface TEXT NOT NULL, date_key TEXT NOT NULL,
+            rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(interface,date_key))''')
+        con.execute('CREATE INDEX IF NOT EXISTS idx_usage_samples_interface_time ON usage_samples(interface,timestamp)')
         con.execute('''CREATE TABLE IF NOT EXISTS usage_monthly (
             interface TEXT NOT NULL, month_key TEXT NOT NULL,
             rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0,
@@ -100,7 +108,7 @@ def init_db():
                 for m in con.execute('SELECT * FROM monthly').fetchall():
                     con.execute('INSERT OR IGNORE INTO usage_monthly(interface,month_key,rx_bytes,tx_bytes) VALUES(?,?,?,?)',
                                 (ACTIVE_INTERFACE, m['month_key'], m['rx_bytes'], m['tx_bytes']))
-        for key, value in [('interface', ACTIVE_INTERFACE), ('display_name', DISPLAY_NAME), *DEFAULT_APPEARANCE.items()]:
+        for key, value in [('interface', ACTIVE_INTERFACE), ('display_name', DISPLAY_NAME), ('download_counter', 'rx'), ('upload_counter', 'tx'), *DEFAULT_APPEARANCE.items()]:
             con.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)', (key, str(value)))
         ACTIVE_INTERFACE = con.execute("SELECT value FROM settings WHERE key='interface'").fetchone()['value']
         DISPLAY_NAME = con.execute("SELECT value FROM settings WHERE key='display_name'").fetchone()['value']
@@ -153,6 +161,16 @@ def sample_once():
             con.execute('''INSERT INTO usage_monthly(interface,month_key,rx_bytes,tx_bytes) VALUES(?,?,?,?)
                 ON CONFLICT(interface,month_key) DO UPDATE SET rx_bytes=rx_bytes+excluded.rx_bytes,
                 tx_bytes=tx_bytes+excluded.tx_bytes''', (interface, mk, max(0, drx), max(0, dtx)))
+            con.execute('INSERT INTO usage_samples(interface,timestamp,rx_bytes,tx_bytes) VALUES(?,?,?,?)',
+                        (interface, now.timestamp(), max(0, drx), max(0, dtx)))
+            con.execute('''INSERT INTO usage_daily(interface,date_key,rx_bytes,tx_bytes) VALUES(?,?,?,?)
+                ON CONFLICT(interface,date_key) DO UPDATE SET rx_bytes=rx_bytes+excluded.rx_bytes,
+                tx_bytes=tx_bytes+excluded.tx_bytes''',
+                (interface, now.strftime('%Y-%m-%d'), max(0, drx), max(0, dtx)))
+            daily_cutoff = (now.date() - timedelta(days=6)).strftime('%Y-%m-%d')
+            con.execute('DELETE FROM usage_daily WHERE interface=? AND date_key<?', (interface, daily_cutoff))
+            con.execute('DELETE FROM usage_samples WHERE interface=? AND timestamp<?',
+                        (interface, now.timestamp() - 7 * 86400))
 
 
 def sampler():
@@ -175,8 +193,12 @@ def read_appearance(con):
 
 @APP.get('/api/interfaces')
 def interfaces():
-    with connect() as con: appearance = read_appearance(con)
-    return jsonify({'interfaces': available_interfaces(), 'selected': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME, 'appearance': appearance})
+    with connect() as con:
+        appearance = read_appearance(con)
+        mapping = {r['key']: r['value'] for r in con.execute("SELECT key,value FROM settings WHERE key IN ('download_counter','upload_counter')").fetchall()}
+    return jsonify({'interfaces': available_interfaces(), 'selected': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME,
+                    'download_counter': mapping.get('download_counter', 'rx'), 'upload_counter': mapping.get('upload_counter', 'tx'),
+                    'appearance': appearance})
 
 
 @APP.post('/api/settings')
@@ -185,6 +207,10 @@ def save_settings():
     data = request.get_json(silent=True) or {}
     new_interface = str(data.get('interface', ACTIVE_INTERFACE)).strip()
     new_name = str(data.get('display_name', DISPLAY_NAME)).strip()[:48] or 'Internet Usage'
+    download_counter = str(data.get('download_counter', 'rx')).lower()
+    upload_counter = str(data.get('upload_counter', 'tx')).lower()
+    if download_counter not in ('rx', 'tx') or upload_counter not in ('rx', 'tx') or download_counter == upload_counter:
+        return jsonify({'error': 'Choose RX for one direction and TX for the other.'}), 400
     appearance = {}
     for key in COLOR_KEYS:
         if key in data:
@@ -216,6 +242,8 @@ def save_settings():
             ensure_interface_state(con, new_interface)
             con.execute("INSERT INTO settings(key,value) VALUES('interface',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_interface,))
             con.execute("INSERT INTO settings(key,value) VALUES('display_name',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_name,))
+            con.execute("INSERT INTO settings(key,value) VALUES('download_counter',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (download_counter,))
+            con.execute("INSERT INTO settings(key,value) VALUES('upload_counter',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (upload_counter,))
             for key, value in appearance.items():
                 con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
         ACTIVE_INTERFACE = new_interface
@@ -223,7 +251,8 @@ def save_settings():
         RATE_RX = RATE_TX = 0.0
         LAST_RATE_TS = None
     with connect() as con: saved_appearance = read_appearance(con)
-    return jsonify({'ok': True, 'interface': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME, 'appearance': saved_appearance})
+    return jsonify({'ok': True, 'interface': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME,
+                    'download_counter': download_counter, 'upload_counter': upload_counter, 'appearance': saved_appearance})
 
 
 @APP.get('/api/status')
@@ -243,11 +272,58 @@ def status():
     download_since_reset = max(0, int(row['total_rx']) - int(row['reset_rx']))
     upload_since_reset = max(0, int(row['total_tx']) - int(row['reset_tx']))
     return jsonify({'interface': interface, 'display_name': DISPLAY_NAME,
-        'download_bps': RATE_RX, 'upload_bps': RATE_TX,
+        'rx_bps': RATE_RX, 'tx_bps': RATE_TX, 'download_bps': RATE_RX, 'upload_bps': RATE_TX,
+        'average_rx_bps': download_since_reset / elapsed_since_reset,
+        'average_tx_bps': upload_since_reset / elapsed_since_reset,
         'average_download_bps': download_since_reset / elapsed_since_reset,
         'average_upload_bps': upload_since_reset / elapsed_since_reset,
+        'rx_since_reset': download_since_reset, 'tx_since_reset': upload_since_reset,
         'download_since_reset': download_since_reset, 'upload_since_reset': upload_since_reset,
         'reset_at': reset_at, 'updated_at': row['updated_at']})
+
+
+@APP.get('/api/usage')
+def usage_history():
+    try:
+        seconds = int(request.args.get('seconds', '0'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid time range'}), 400
+    if seconds not in (0, 300, 600, 1800, 3600, 10800, 21600, 43200, 86400):
+        return jsonify({'error': 'Unsupported time range'}), 400
+    now = local_now().timestamp()
+    interface = ACTIVE_INTERFACE
+    with LOCK:
+        with connect() as con:
+            state = con.execute('SELECT COALESCE(reset_at,updated_at) AS reset_at,total_rx,total_tx,reset_rx,reset_tx FROM usage_state WHERE interface=?', (interface,)).fetchone()
+            if state is None:
+                return jsonify({'error': 'Usage database is not initialized'}), 500
+            start = datetime.fromisoformat(state['reset_at']).timestamp() if seconds == 0 else now - seconds
+            bucket_seconds = max(float(POLL_SECONDS), (now - start) / 800 if now > start else float(POLL_SECONDS))
+            rows = con.execute('''SELECT CAST((timestamp-?)/? AS INTEGER) AS bucket,
+                SUM(rx_bytes) AS rx_bytes,SUM(tx_bytes) AS tx_bytes FROM usage_samples
+                WHERE interface=? AND timestamp>=? GROUP BY bucket ORDER BY bucket''',
+                (start, bucket_seconds, interface, start)).fetchall()
+            totals = con.execute('''SELECT COALESCE(SUM(rx_bytes),0) AS rx_bytes,
+                COALESCE(SUM(tx_bytes),0) AS tx_bytes FROM usage_samples
+                WHERE interface=? AND timestamp>=?''', (interface, start)).fetchone()
+    download_bytes = max(0, int(state['total_rx']) - int(state['reset_rx'])) if seconds == 0 else int(totals['rx_bytes'])
+    upload_bytes = max(0, int(state['total_tx']) - int(state['reset_tx'])) if seconds == 0 else int(totals['tx_bytes'])
+    samples = [{'time': min(now, start + (int(x['bucket']) + 1) * bucket_seconds),
+                'download': int(x['rx_bytes']) / bucket_seconds,
+                'upload': int(x['tx_bytes']) / bucket_seconds} for x in rows]
+    return jsonify({'interface': interface, 'start': start, 'end': now,
+        'download_bytes': download_bytes, 'upload_bytes': upload_bytes, 'samples': samples})
+
+
+@APP.get('/api/daily')
+def daily_usage():
+    interface = ACTIVE_INTERFACE
+    with LOCK:
+        with connect() as con:
+            rows = con.execute('''SELECT date_key,rx_bytes,tx_bytes FROM usage_daily
+                WHERE interface=? ORDER BY date_key DESC LIMIT 7''', (interface,)).fetchall()
+    return jsonify({'days': [{'date': r['date_key'], 'download_bytes': int(r['rx_bytes']),
+                              'upload_bytes': int(r['tx_bytes'])} for r in rows]})
 
 
 @APP.post('/api/reset')

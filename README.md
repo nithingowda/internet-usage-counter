@@ -44,11 +44,11 @@ The dashboard displays both:
 - Mbps = megabits per second (bytes/second × 8 ÷ 1,000,000)
 - MB/s = megabytes per second (bytes/second ÷ 1,000,000)
 
-The live graph plots download and upload speed for the selected time range (1 minute to 1 hour). Use the graph selector to switch between Mbps and MB/s. The graph history is held in the browser and starts fresh when the page is reloaded; cumulative usage counters remain persistent in SQLite.
+The historical graph plots download and upload speed for the selected time range (5 minutes to 24 hours). Use the graph selector to switch between Mbps and MB/s. Timestamped samples are stored in SQLite and remain available after a page reload; newly collected history begins when the feature is deployed.
 
 ## Dashboard settings and graph
 
-Open **Settings** in the dashboard to change the display name and choose a network interface (for example, `eth0` or `wlan0`). Settings and per-interface counters are saved in the SQLite database under `./data`, so switching interfaces keeps each interface's totals separate. Live speed cards show both Mbps and MB/s. The graph supports 1-minute, 5-minute, 15-minute, 30-minute, and 1-hour windows; graph samples are held in the browser and start collecting when the page is open.
+Open **Settings** in the dashboard to change the display name and choose a network interface (for example, `eth0` or `wlan0`). Settings and per-interface counters are saved in the SQLite database under `./data`, so switching interfaces keeps each interface's totals separate. Live speed cards show both Mbps and MB/s. The graph supports 5-minute, 10-minute, 30-minute, 1-hour, 3-hour, 6-hour, 12-hour, and 24-hour windows; samples persist in SQLite.
 
 The container uses host networking and mounts `/sys` read-only so it can read Linux interface counters. These counters measure traffic on the selected Raspberry Pi interface, not total traffic for every device on the router unless that traffic passes through the Pi.
 
@@ -63,3 +63,12 @@ Open **Settings** in the dashboard to customize the appearance:
 - Preview colour, title, and logo changes in the page before saving; use **Reset appearance** to restore the defaults.
 
 Appearance preferences, including the uploaded logo, are stored in the existing SQLite settings table and persist across page reloads and container restarts. The existing network-interface and dashboard-name settings continue to work as before.
+
+
+## Time-range usage and RX/TX settings
+
+The dashboard stores timestamped RX/TX traffic deltas in SQLite so the speed graph can show historical data after a page reload. Select 5 minutes, 10 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 12 hours, or 24 hours. The chart API aggregates samples into at most about 800 points for efficient loading and retains seven days of short-interval samples. Historical graph data begins accumulating after this feature is deployed.
+
+The Data usage selector shows totals since reset or over the same time windows. A daily usage table below it shows the last seven calendar dates. Since-reset totals come from persistent cumulative counters, so they are not limited by the seven-day graph-history retention.
+
+Under Settings → Traffic direction mapping, choose which interface counter is treated as Download and which as Upload. Defaults are RX (received) for Download and TX (transmitted) for Upload; the settings allow swapping them when an interface is presented in the opposite direction.
