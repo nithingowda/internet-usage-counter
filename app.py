@@ -322,7 +322,7 @@ def usage_history():
         seconds = int(request.args.get('seconds', '0'))
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid time range'}), 400
-    if seconds not in (0, 300, 600, 1800, 3600, 10800, 21600, 43200, 86400):
+    if seconds not in (0, 60, 180, 300, 600, 1800, 3600, 10800, 21600, 43200, 86400):
         return jsonify({'error': 'Unsupported time range'}), 400
     now = local_now().timestamp()
     interface = ACTIVE_INTERFACE
