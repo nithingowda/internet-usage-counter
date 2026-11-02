@@ -1,0 +1,14 @@
+services:
+  internet-usage:
+    build: .
+    container_name: raspi-internet-usage
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      INTERFACE: eth0
+      DATA_DIR: /data
+      POLL_SECONDS: "2"
+      TZ: Asia/Kolkata
+    volumes:
+      - ./data:/data
+      - /sys/class/net:/sys/class/net:ro

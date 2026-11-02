@@ -1,0 +1,14 @@
+services:
+  internet-usage:
+    build: .
+    container_name: raspi-internet-usage
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      INTERFACE: eth0
+      PORT: 8787
+      DB_PATH: /data/usage.db
+      POLL_SECONDS: 2
+    volumes:
+      - ./data:/data
+      - /sys:/sys:ro
