@@ -322,7 +322,7 @@ def usage_history():
         seconds = int(request.args.get('seconds', '0'))
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid time range'}), 400
-    if seconds not in (0, 300, 600, 1800, 3600, 10800, 21600, 43200, 86400):
+    if seconds not in (0, 60, 180, 300, 600, 1800, 3600, 10800, 21600, 43200, 86400):
         return jsonify({'error': 'Unsupported time range'}), 400
     now = local_now().timestamp()
     interface = ACTIVE_INTERFACE
@@ -379,6 +379,40 @@ def reset():
             con.execute('''UPDATE usage_state SET reset_rx=?, reset_tx=?, reset_at=? WHERE interface=?''',
                         (int(row['total_rx']), int(row['total_tx']), reset_time, ACTIVE_INTERFACE))
     return jsonify({'ok': True, 'reset_at': reset_time})
+
+
+@APP.post('/api/reset-all')
+def reset_all():
+    """Clear all stored usage and history for the currently selected interface."""
+    global RATE_RX, RATE_TX, LAST_RATE_TS
+    interface = ACTIVE_INTERFACE
+    try:
+        rx, tx = read_interface_counters(interface)
+    except Exception as exc:
+        return jsonify({'error': f'Cannot read interface counters: {exc}'}), 503
+    now = local_now()
+    reset_time = now.isoformat()
+    month_key = now.strftime('%Y-%m')
+    date_key = now.strftime('%Y-%m-%d')
+    with LOCK:
+        with connect() as con:
+            row = con.execute('SELECT interface FROM usage_state WHERE interface=?', (interface,)).fetchone()
+            if row is None:
+                ensure_interface_state(con, interface)
+            con.execute('''UPDATE usage_state SET last_rx=?,last_tx=?,total_rx=0,total_tx=0,
+                reset_rx=0,reset_tx=0,month_key=?,month_rx=0,month_tx=0,updated_at=?,reset_at=?
+                WHERE interface=?''', (rx, tx, month_key, reset_time, reset_time, interface))
+            con.execute('DELETE FROM usage_samples WHERE interface=?', (interface,))
+            con.execute('DELETE FROM usage_daily WHERE interface=?', (interface,))
+            con.execute('DELETE FROM usage_monthly WHERE interface=?', (interface,))
+            con.execute('INSERT INTO usage_daily(interface,date_key,rx_bytes,tx_bytes) VALUES(?,?,0,0)',
+                        (interface, date_key))
+            con.execute('INSERT INTO usage_monthly(interface,month_key,rx_bytes,tx_bytes) VALUES(?,?,0,0)',
+                        (interface, month_key))
+        RATE_RX = RATE_TX = 0.0
+        LAST_RATE_TS = time.monotonic()
+    return jsonify({'ok': True, 'reset_at': reset_time, 'cleared': 'all_usage_history'})
+
 
 @APP.get('/health')
 def health():
