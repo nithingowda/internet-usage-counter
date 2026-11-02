@@ -1,7 +1,7 @@
 services:
   internet-usage:
     build: .
-    container_name: raspi-internet-usage
+    container_name: Internet-Data-Usage-Counter
     restart: unless-stopped
     network_mode: host
     environment:
