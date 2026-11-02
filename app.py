@@ -76,11 +76,15 @@ def init_db():
             total_rx INTEGER NOT NULL DEFAULT 0, total_tx INTEGER NOT NULL DEFAULT 0,
             reset_rx INTEGER NOT NULL DEFAULT 0, reset_tx INTEGER NOT NULL DEFAULT 0,
             month_key TEXT NOT NULL, month_rx INTEGER NOT NULL DEFAULT 0,
-            month_tx INTEGER NOT NULL DEFAULT 0, updated_at TEXT)''')
+            month_tx INTEGER NOT NULL DEFAULT 0, updated_at TEXT, reset_at TEXT)''')
         con.execute('''CREATE TABLE IF NOT EXISTS usage_monthly (
             interface TEXT NOT NULL, month_key TEXT NOT NULL,
             rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY(interface, month_key))''')
+        columns = {r['name'] for r in con.execute('PRAGMA table_info(usage_state)').fetchall()}
+        if 'reset_at' not in columns:
+            con.execute('ALTER TABLE usage_state ADD COLUMN reset_at TEXT')
+        con.execute('UPDATE usage_state SET reset_at=COALESCE(reset_at, updated_at, ?)', (local_now().isoformat(),))
         # Preserve data from the original single-interface database on upgrade.
         old = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='state'").fetchone()
         if old:
@@ -111,8 +115,8 @@ def ensure_interface_state(con, interface):
         except Exception:
             rx, tx = 0, 0
         mk = local_now().strftime('%Y-%m')
-        con.execute('''INSERT INTO usage_state(interface,last_rx,last_tx,month_key,updated_at)
-                       VALUES(?,?,?,?,?)''', (interface, rx, tx, mk, local_now().isoformat()))
+        con.execute('''INSERT INTO usage_state(interface,last_rx,last_tx,month_key,updated_at,reset_at)
+                       VALUES(?,?,?,?,?,?)''', (interface, rx, tx, mk, local_now().isoformat(), local_now().isoformat()))
         con.execute('INSERT OR IGNORE INTO usage_monthly(interface,month_key) VALUES(?,?)', (interface, mk))
 
 
@@ -231,31 +235,33 @@ def status():
             months = con.execute('SELECT month_key,rx_bytes,tx_bytes FROM usage_monthly WHERE interface=? ORDER BY month_key DESC LIMIT 12', (interface,)).fetchall()
     if row is None:
         return jsonify({'error': 'Usage database is not initialized'}), 500
-    month_key = local_now().strftime('%Y-%m')
-    month_rx, month_tx = (int(row['month_rx']), int(row['month_tx'])) if row['month_key'] == month_key else (0, 0)
+    reset_at = row['reset_at'] or row['updated_at']
+    try:
+        elapsed_since_reset = max(1.0, (local_now() - datetime.fromisoformat(reset_at)).total_seconds())
+    except Exception:
+        elapsed_since_reset = 1.0
+    download_since_reset = max(0, int(row['total_rx']) - int(row['reset_rx']))
+    upload_since_reset = max(0, int(row['total_tx']) - int(row['reset_tx']))
     return jsonify({'interface': interface, 'display_name': DISPLAY_NAME,
         'download_bps': RATE_RX, 'upload_bps': RATE_TX,
-        'download_since_reset': max(0, int(row['total_rx']) - int(row['reset_rx'])),
-        'upload_since_reset': max(0, int(row['total_tx']) - int(row['reset_tx'])),
-        'download_total': int(row['total_rx']), 'upload_total': int(row['total_tx']),
-        'download_month': month_rx, 'upload_month': month_tx, 'month': month_key,
-        'updated_at': row['updated_at'], 'monthly_history': [dict(m) for m in months]})
+        'average_download_bps': download_since_reset / elapsed_since_reset,
+        'average_upload_bps': upload_since_reset / elapsed_since_reset,
+        'download_since_reset': download_since_reset, 'upload_since_reset': upload_since_reset,
+        'reset_at': reset_at, 'updated_at': row['updated_at']})
 
 
-@APP.post('/api/reset/<direction>')
-def reset(direction):
-    if direction not in ('download', 'upload', 'both'):
-        return jsonify({'error': 'Unknown reset direction'}), 400
+@APP.post('/api/reset')
+def reset():
     sample_once()
+    reset_time = local_now().isoformat()
     with LOCK:
         with connect() as con:
             row = con.execute('SELECT total_rx,total_tx FROM usage_state WHERE interface=?', (ACTIVE_INTERFACE,)).fetchone()
-            if direction in ('download', 'both'):
-                con.execute('UPDATE usage_state SET reset_rx=? WHERE interface=?', (int(row['total_rx']), ACTIVE_INTERFACE))
-            if direction in ('upload', 'both'):
-                con.execute('UPDATE usage_state SET reset_tx=? WHERE interface=?', (int(row['total_tx']), ACTIVE_INTERFACE))
-    return jsonify({'ok': True, 'reset': direction})
-
+            if row is None:
+                return jsonify({'error': 'Usage database is not initialized'}), 500
+            con.execute('''UPDATE usage_state SET reset_rx=?, reset_tx=?, reset_at=? WHERE interface=?''',
+                        (int(row['total_rx']), int(row['total_tx']), reset_time, ACTIVE_INTERFACE))
+    return jsonify({'ok': True, 'reset_at': reset_time})
 
 @APP.get('/health')
 def health():
