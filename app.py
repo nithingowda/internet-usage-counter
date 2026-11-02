@@ -167,7 +167,7 @@ def sample_once():
                 ON CONFLICT(interface,date_key) DO UPDATE SET rx_bytes=rx_bytes+excluded.rx_bytes,
                 tx_bytes=tx_bytes+excluded.tx_bytes''',
                 (interface, now.strftime('%Y-%m-%d'), max(0, drx), max(0, dtx)))
-            daily_cutoff = (now.date() - timedelta(days=6)).strftime('%Y-%m-%d')
+            daily_cutoff = (now.date() - timedelta(days=400)).strftime('%Y-%m-%d')
             con.execute('DELETE FROM usage_daily WHERE interface=? AND date_key<?', (interface, daily_cutoff))
             con.execute('DELETE FROM usage_samples WHERE interface=? AND timestamp<?',
                         (interface, now.timestamp() - 7 * 86400))
@@ -317,12 +317,19 @@ def usage_history():
 
 @APP.get('/api/daily')
 def daily_usage():
+    month = request.args.get('month', local_now().strftime('%Y-%m'))
+    try:
+        first_day = datetime.strptime(month + '-01', '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid calendar month'}), 400
+    next_month = (first_day.replace(day=28) + timedelta(days=4)).replace(day=1)
     interface = ACTIVE_INTERFACE
     with LOCK:
         with connect() as con:
             rows = con.execute('''SELECT date_key,rx_bytes,tx_bytes FROM usage_daily
-                WHERE interface=? ORDER BY date_key DESC LIMIT 7''', (interface,)).fetchall()
-    return jsonify({'days': [{'date': r['date_key'], 'download_bytes': int(r['rx_bytes']),
+                WHERE interface=? AND date_key>=? AND date_key<? ORDER BY date_key''',
+                (interface, first_day.isoformat(), next_month.isoformat())).fetchall()
+    return jsonify({'month': month, 'days': [{'date': r['date_key'], 'download_bytes': int(r['rx_bytes']),
                               'upload_bytes': int(r['tx_bytes'])} for r in rows]})
 
 
