@@ -63,3 +63,12 @@ Open **Settings** in the dashboard to customize the appearance:
 - Preview colour, title, and logo changes in the page before saving; use **Reset appearance** to restore the defaults.
 
 Appearance preferences, including the uploaded logo, are stored in the existing SQLite settings table and persist across page reloads and container restarts. The existing network-interface and dashboard-name settings continue to work as before.
+
+
+## Time-range usage and RX/TX settings
+
+The dashboard stores timestamped RX/TX traffic deltas in SQLite so the speed graph can show historical data after a page reload. Select 5 minutes, 10 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 12 hours, or 24 hours. The chart API aggregates samples into at most about 800 points for efficient loading and retains seven days of short-interval samples. Historical graph data begins accumulating after this feature is deployed.
+
+The Data usage selector shows totals since reset or over the same time windows. A daily usage table below it shows the last seven calendar dates. Since-reset totals come from persistent cumulative counters, so they are not limited by the seven-day graph-history retention.
+
+Under Settings → Traffic direction mapping, choose which interface counter is treated as Download and which as Upload. Defaults are RX (received) for Download and TX (transmitted) for Upload; the settings allow swapping them when an interface is presented in the opposite direction.
