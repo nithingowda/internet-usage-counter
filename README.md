@@ -44,11 +44,11 @@ The dashboard displays both:
 - Mbps = megabits per second (bytes/second × 8 ÷ 1,000,000)
 - MB/s = megabytes per second (bytes/second ÷ 1,000,000)
 
-The live graph plots download and upload speed for the selected time range (1 minute to 1 hour). Use the graph selector to switch between Mbps and MB/s. The graph history is held in the browser and starts fresh when the page is reloaded; cumulative usage counters remain persistent in SQLite.
+The historical graph plots download and upload speed for the selected time range (5 minutes to 24 hours). Use the graph selector to switch between Mbps and MB/s. Timestamped samples are stored in SQLite and remain available after a page reload; newly collected history begins when the feature is deployed.
 
 ## Dashboard settings and graph
 
-Open **Settings** in the dashboard to change the display name and choose a network interface (for example, `eth0` or `wlan0`). Settings and per-interface counters are saved in the SQLite database under `./data`, so switching interfaces keeps each interface's totals separate. Live speed cards show both Mbps and MB/s. The graph supports 1-minute, 5-minute, 15-minute, 30-minute, and 1-hour windows; graph samples are held in the browser and start collecting when the page is open.
+Open **Settings** in the dashboard to change the display name and choose a network interface (for example, `eth0` or `wlan0`). Settings and per-interface counters are saved in the SQLite database under `./data`, so switching interfaces keeps each interface's totals separate. Live speed cards show both Mbps and MB/s. The graph supports 5-minute, 10-minute, 30-minute, 1-hour, 3-hour, 6-hour, 12-hour, and 24-hour windows; samples persist in SQLite.
 
 The container uses host networking and mounts `/sys` read-only so it can read Linux interface counters. These counters measure traffic on the selected Raspberry Pi interface, not total traffic for every device on the router unless that traffic passes through the Pi.
 
