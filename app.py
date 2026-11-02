@@ -77,6 +77,10 @@ def init_db():
             reset_rx INTEGER NOT NULL DEFAULT 0, reset_tx INTEGER NOT NULL DEFAULT 0,
             month_key TEXT NOT NULL, month_rx INTEGER NOT NULL DEFAULT 0,
             month_tx INTEGER NOT NULL DEFAULT 0, updated_at TEXT, reset_at TEXT)''')
+        con.execute('''CREATE TABLE IF NOT EXISTS usage_samples (
+            interface TEXT NOT NULL, timestamp REAL NOT NULL,
+            rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0)''')
+        con.execute('CREATE INDEX IF NOT EXISTS idx_usage_samples_interface_time ON usage_samples(interface,timestamp)')
         con.execute('''CREATE TABLE IF NOT EXISTS usage_monthly (
             interface TEXT NOT NULL, month_key TEXT NOT NULL,
             rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0,
@@ -153,6 +157,10 @@ def sample_once():
             con.execute('''INSERT INTO usage_monthly(interface,month_key,rx_bytes,tx_bytes) VALUES(?,?,?,?)
                 ON CONFLICT(interface,month_key) DO UPDATE SET rx_bytes=rx_bytes+excluded.rx_bytes,
                 tx_bytes=tx_bytes+excluded.tx_bytes''', (interface, mk, max(0, drx), max(0, dtx)))
+            con.execute('INSERT INTO usage_samples(interface,timestamp,rx_bytes,tx_bytes) VALUES(?,?,?,?)',
+                        (interface, now.timestamp(), max(0, drx), max(0, dtx)))
+            con.execute('DELETE FROM usage_samples WHERE interface=? AND timestamp<?',
+                        (interface, now.timestamp() - 7 * 86400))
 
 
 def sampler():
@@ -248,6 +256,31 @@ def status():
         'average_upload_bps': upload_since_reset / elapsed_since_reset,
         'download_since_reset': download_since_reset, 'upload_since_reset': upload_since_reset,
         'reset_at': reset_at, 'updated_at': row['updated_at']})
+
+
+@APP.get('/api/usage')
+def usage_history():
+    try:
+        seconds = int(request.args.get('seconds', '0'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Invalid time range'}), 400
+    if seconds not in (0, 300, 600, 1800, 3600, 10800, 21600, 43200, 86400):
+        return jsonify({'error': 'Unsupported time range'}), 400
+    now = local_now().timestamp()
+    interface = ACTIVE_INTERFACE
+    with LOCK:
+        with connect() as con:
+            state = con.execute('SELECT reset_at FROM usage_state WHERE interface=?', (interface,)).fetchone()
+            if state is None:
+                return jsonify({'error': 'Usage database is not initialized'}), 500
+            start = datetime.fromisoformat(state['reset_at']).timestamp() if seconds == 0 else now - seconds
+            rows = con.execute('''SELECT timestamp,rx_bytes,tx_bytes FROM usage_samples
+                WHERE interface=? AND timestamp>=? ORDER BY timestamp''', (interface, start)).fetchall()
+    return jsonify({'interface': interface, 'start': start, 'end': now,
+        'download_bytes': sum(int(x['rx_bytes']) for x in rows),
+        'upload_bytes': sum(int(x['tx_bytes']) for x in rows),
+        'samples': [{'time': float(x['timestamp']), 'download': int(x['rx_bytes']),
+                     'upload': int(x['tx_bytes'])} for x in rows]})
 
 
 @APP.post('/api/reset')
