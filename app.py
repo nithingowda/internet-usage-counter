@@ -3,7 +3,7 @@ import time
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from flask import Flask, jsonify, render_template, request
 
@@ -80,6 +80,10 @@ def init_db():
         con.execute('''CREATE TABLE IF NOT EXISTS usage_samples (
             interface TEXT NOT NULL, timestamp REAL NOT NULL,
             rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0)''')
+        con.execute('''CREATE TABLE IF NOT EXISTS usage_daily (
+            interface TEXT NOT NULL, date_key TEXT NOT NULL,
+            rx_bytes INTEGER NOT NULL DEFAULT 0, tx_bytes INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(interface,date_key))''')
         con.execute('CREATE INDEX IF NOT EXISTS idx_usage_samples_interface_time ON usage_samples(interface,timestamp)')
         con.execute('''CREATE TABLE IF NOT EXISTS usage_monthly (
             interface TEXT NOT NULL, month_key TEXT NOT NULL,
@@ -159,6 +163,12 @@ def sample_once():
                 tx_bytes=tx_bytes+excluded.tx_bytes''', (interface, mk, max(0, drx), max(0, dtx)))
             con.execute('INSERT INTO usage_samples(interface,timestamp,rx_bytes,tx_bytes) VALUES(?,?,?,?)',
                         (interface, now.timestamp(), max(0, drx), max(0, dtx)))
+            con.execute('''INSERT INTO usage_daily(interface,date_key,rx_bytes,tx_bytes) VALUES(?,?,?,?)
+                ON CONFLICT(interface,date_key) DO UPDATE SET rx_bytes=rx_bytes+excluded.rx_bytes,
+                tx_bytes=tx_bytes+excluded.tx_bytes''',
+                (interface, now.strftime('%Y-%m-%d'), max(0, drx), max(0, dtx)))
+            daily_cutoff = (now.date() - timedelta(days=6)).strftime('%Y-%m-%d')
+            con.execute('DELETE FROM usage_daily WHERE interface=? AND date_key<?', (interface, daily_cutoff))
             con.execute('DELETE FROM usage_samples WHERE interface=? AND timestamp<?',
                         (interface, now.timestamp() - 7 * 86400))
 
@@ -288,37 +298,32 @@ def usage_history():
             if state is None:
                 return jsonify({'error': 'Usage database is not initialized'}), 500
             start = datetime.fromisoformat(state['reset_at']).timestamp() if seconds == 0 else now - seconds
-            rows = con.execute('''SELECT timestamp,rx_bytes,tx_bytes FROM usage_samples
-                WHERE interface=? AND timestamp>=? ORDER BY timestamp''', (interface, start)).fetchall()
-    download_bytes = max(0, int(state['total_rx']) - int(state['reset_rx'])) if seconds == 0 else sum(int(x['rx_bytes']) for x in rows)
-    upload_bytes = max(0, int(state['total_tx']) - int(state['reset_tx'])) if seconds == 0 else sum(int(x['tx_bytes']) for x in rows)
+            bucket_seconds = max(float(POLL_SECONDS), (now - start) / 800 if now > start else float(POLL_SECONDS))
+            rows = con.execute('''SELECT CAST((timestamp-?)/? AS INTEGER) AS bucket,
+                SUM(rx_bytes) AS rx_bytes,SUM(tx_bytes) AS tx_bytes FROM usage_samples
+                WHERE interface=? AND timestamp>=? GROUP BY bucket ORDER BY bucket''',
+                (start, bucket_seconds, interface, start)).fetchall()
+            totals = con.execute('''SELECT COALESCE(SUM(rx_bytes),0) AS rx_bytes,
+                COALESCE(SUM(tx_bytes),0) AS tx_bytes FROM usage_samples
+                WHERE interface=? AND timestamp>=?''', (interface, start)).fetchone()
+    download_bytes = max(0, int(state['total_rx']) - int(state['reset_rx'])) if seconds == 0 else int(totals['rx_bytes'])
+    upload_bytes = max(0, int(state['total_tx']) - int(state['reset_tx'])) if seconds == 0 else int(totals['tx_bytes'])
+    samples = [{'time': min(now, start + (int(x['bucket']) + 1) * bucket_seconds),
+                'download': int(x['rx_bytes']) / bucket_seconds,
+                'upload': int(x['tx_bytes']) / bucket_seconds} for x in rows]
     return jsonify({'interface': interface, 'start': start, 'end': now,
-        'download_bytes': download_bytes,
-        'upload_bytes': upload_bytes,
-        'samples': [{'time': float(x['timestamp']), 'download': int(x['rx_bytes']),
-                     'upload': int(x['tx_bytes'])} for x in rows]})
+        'download_bytes': download_bytes, 'upload_bytes': upload_bytes, 'samples': samples})
 
 
 @APP.get('/api/daily')
 def daily_usage():
     interface = ACTIVE_INTERFACE
-    cutoff = local_now().timestamp() - 7 * 86400
-    try:
-        zone = ZoneInfo(TZ_NAME)
-    except Exception:
-        zone = None
     with LOCK:
         with connect() as con:
-            rows = con.execute('''SELECT timestamp,rx_bytes,tx_bytes FROM usage_samples
-                WHERE interface=? AND timestamp>=? ORDER BY timestamp''', (interface, cutoff)).fetchall()
-    grouped = {}
-    for row in rows:
-        stamp = float(row['timestamp'])
-        day = datetime.fromtimestamp(stamp, zone).strftime('%Y-%m-%d') if zone else datetime.fromtimestamp(stamp).strftime('%Y-%m-%d')
-        bucket = grouped.setdefault(day, {'date': day, 'download_bytes': 0, 'upload_bytes': 0})
-        bucket['download_bytes'] += int(row['rx_bytes'])
-        bucket['upload_bytes'] += int(row['tx_bytes'])
-    return jsonify({'days': [grouped[key] for key in sorted(grouped, reverse=True)]})
+            rows = con.execute('''SELECT date_key,rx_bytes,tx_bytes FROM usage_daily
+                WHERE interface=? ORDER BY date_key DESC LIMIT 7''', (interface,)).fetchall()
+    return jsonify({'days': [{'date': r['date_key'], 'download_bytes': int(r['rx_bytes']),
+                              'upload_bytes': int(r['tx_bytes'])} for r in rows]})
 
 
 @APP.post('/api/reset')
