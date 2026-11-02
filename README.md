@@ -44,10 +44,22 @@ The dashboard displays both:
 - Mbps = megabits per second (bytes/second × 8 ÷ 1,000,000)
 - MB/s = megabytes per second (bytes/second ÷ 1,000,000)
 
-The live graph plots download and upload speed for the last 2 minutes. Use the graph selector to switch between Mbps and MB/s. The graph history is held in the browser and starts fresh when the page is reloaded; cumulative usage counters remain persistent in SQLite.
+The live graph plots download and upload speed for the selected time range (1 minute to 1 hour). Use the graph selector to switch between Mbps and MB/s. The graph history is held in the browser and starts fresh when the page is reloaded; cumulative usage counters remain persistent in SQLite.
 
 ## Dashboard settings and graph
 
 Open **Settings** in the dashboard to change the display name and choose a network interface (for example, `eth0` or `wlan0`). Settings and per-interface counters are saved in the SQLite database under `./data`, so switching interfaces keeps each interface's totals separate. Live speed cards show both Mbps and MB/s. The graph supports 1-minute, 5-minute, 15-minute, 30-minute, and 1-hour windows; graph samples are held in the browser and start collecting when the page is open.
 
 The container uses host networking and mounts `/sys` read-only so it can read Linux interface counters. These counters measure traffic on the selected Raspberry Pi interface, not total traffic for every device on the router unless that traffic passes through the Pi.
+
+
+## Dashboard customization
+
+Open **Settings** in the dashboard to customize the appearance:
+
+- Change the primary/download, accent/upload, background, card, and text colours with colour pickers.
+- Set the dashboard title alignment to left, centre, or right (centre is the default).
+- Upload a PNG, JPG, WEBP, or SVG logo up to 500 KB and adjust its displayed width.
+- Preview colour, title, and logo changes in the page before saving; use **Reset appearance** to restore the defaults.
+
+Appearance preferences, including the uploaded logo, are stored in the existing SQLite settings table and persist across page reloads and container restarts. The existing network-interface and dashboard-name settings continue to work as before.
