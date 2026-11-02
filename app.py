@@ -19,6 +19,14 @@ LAST_RATE_TS = None
 ACTIVE_INTERFACE = os.environ.get('INTERFACE', 'eth0')
 DISPLAY_NAME = os.environ.get('DISPLAY_NAME', 'Internet Usage')
 
+DEFAULT_APPEARANCE = {
+    'primary_color': '#34d399', 'accent_color': '#60a5fa',
+    'background_color': '#0b1220', 'card_color': '#172438',
+    'text_color': '#e5edf7', 'title_alignment': 'center',
+    'logo_data': '', 'logo_width': '120',
+}
+COLOR_KEYS = {'primary_color', 'accent_color', 'background_color', 'card_color', 'text_color'}
+
 
 def local_now():
     try:
@@ -88,8 +96,8 @@ def init_db():
                 for m in con.execute('SELECT * FROM monthly').fetchall():
                     con.execute('INSERT OR IGNORE INTO usage_monthly(interface,month_key,rx_bytes,tx_bytes) VALUES(?,?,?,?)',
                                 (ACTIVE_INTERFACE, m['month_key'], m['rx_bytes'], m['tx_bytes']))
-        for key, value in [('interface', ACTIVE_INTERFACE), ('display_name', DISPLAY_NAME)]:
-            con.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)', (key, value))
+        for key, value in [('interface', ACTIVE_INTERFACE), ('display_name', DISPLAY_NAME), *DEFAULT_APPEARANCE.items()]:
+            con.execute('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)', (key, str(value)))
         ACTIVE_INTERFACE = con.execute("SELECT value FROM settings WHERE key='interface'").fetchone()['value']
         DISPLAY_NAME = con.execute("SELECT value FROM settings WHERE key='display_name'").fetchone()['value']
         ensure_interface_state(con, ACTIVE_INTERFACE)
@@ -154,9 +162,17 @@ def index():
     return render_template('index.html', interface=ACTIVE_INTERFACE, display_name=DISPLAY_NAME)
 
 
+def read_appearance(con):
+    values = {r['key']: r['value'] for r in con.execute('SELECT key,value FROM settings').fetchall()}
+    result = dict(DEFAULT_APPEARANCE)
+    result.update({k: values[k] for k in result if k in values})
+    return result
+
+
 @APP.get('/api/interfaces')
 def interfaces():
-    return jsonify({'interfaces': available_interfaces(), 'selected': ACTIVE_INTERFACE})
+    with connect() as con: appearance = read_appearance(con)
+    return jsonify({'interfaces': available_interfaces(), 'selected': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME, 'appearance': appearance})
 
 
 @APP.post('/api/settings')
@@ -165,6 +181,28 @@ def save_settings():
     data = request.get_json(silent=True) or {}
     new_interface = str(data.get('interface', ACTIVE_INTERFACE)).strip()
     new_name = str(data.get('display_name', DISPLAY_NAME)).strip()[:48] or 'Internet Usage'
+    appearance = {}
+    for key in COLOR_KEYS:
+        if key in data:
+            value = str(data[key]).strip()
+            if len(value) != 7 or not value.startswith('#') or any(c not in '0123456789abcdefABCDEF' for c in value[1:]):
+                return jsonify({'error': f'Invalid color value for {key}'}), 400
+            appearance[key] = value
+    if 'title_alignment' in data:
+        alignment = str(data['title_alignment'])
+        if alignment not in ('left', 'center', 'right'):
+            return jsonify({'error': 'Invalid title alignment'}), 400
+        appearance['title_alignment'] = alignment
+    if 'logo_width' in data:
+        try: width = max(40, min(320, int(data['logo_width'])))
+        except (TypeError, ValueError): return jsonify({'error': 'Invalid logo width'}), 400
+        appearance['logo_width'] = str(width)
+    if 'logo_data' in data:
+        logo = str(data['logo_data'] or '')
+        allowed = ('data:image/png;base64,', 'data:image/jpeg;base64,', 'data:image/webp;base64,', 'data:image/svg+xml;base64,')
+        if logo and (not logo.startswith(allowed) or len(logo) > 700000):
+            return jsonify({'error': 'Logo must be PNG, JPG, WEBP or SVG and under 500 KB'}), 400
+        appearance['logo_data'] = logo
     if new_interface not in available_interfaces():
         return jsonify({'error': 'Selected network interface is not available'}), 400
     with LOCK:
@@ -174,11 +212,14 @@ def save_settings():
             ensure_interface_state(con, new_interface)
             con.execute("INSERT INTO settings(key,value) VALUES('interface',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_interface,))
             con.execute("INSERT INTO settings(key,value) VALUES('display_name',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_name,))
+            for key, value in appearance.items():
+                con.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
         ACTIVE_INTERFACE = new_interface
         DISPLAY_NAME = new_name
         RATE_RX = RATE_TX = 0.0
         LAST_RATE_TS = None
-    return jsonify({'ok': True, 'interface': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME})
+    with connect() as con: saved_appearance = read_appearance(con)
+    return jsonify({'ok': True, 'interface': ACTIVE_INTERFACE, 'display_name': DISPLAY_NAME, 'appearance': saved_appearance})
 
 
 @APP.get('/api/status')
@@ -190,6 +231,7 @@ def status():
             months = con.execute('SELECT month_key,rx_bytes,tx_bytes FROM usage_monthly WHERE interface=? ORDER BY month_key DESC LIMIT 12', (interface,)).fetchall()
     if row is None:
         return jsonify({'error': 'Usage database is not initialized'}), 500
+    with connect() as con: appearance = read_appearance(con)
     month_key = local_now().strftime('%Y-%m')
     month_rx, month_tx = (int(row['month_rx']), int(row['month_tx'])) if row['month_key'] == month_key else (0, 0)
     return jsonify({'interface': interface, 'display_name': DISPLAY_NAME,
@@ -198,7 +240,7 @@ def status():
         'upload_since_reset': max(0, int(row['total_tx']) - int(row['reset_tx'])),
         'download_total': int(row['total_rx']), 'upload_total': int(row['total_tx']),
         'download_month': month_rx, 'upload_month': month_tx, 'month': month_key,
-        'updated_at': row['updated_at'], 'monthly_history': [dict(m) for m in months]})
+        'updated_at': row['updated_at'], 'monthly_history': [dict(m) for m in months], 'appearance': appearance})
 
 
 @APP.post('/api/reset/<direction>')
