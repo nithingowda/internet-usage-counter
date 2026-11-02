@@ -294,7 +294,7 @@ def usage_history():
     interface = ACTIVE_INTERFACE
     with LOCK:
         with connect() as con:
-            state = con.execute('SELECT reset_at,total_rx,total_tx,reset_rx,reset_tx FROM usage_state WHERE interface=?', (interface,)).fetchone()
+            state = con.execute('SELECT COALESCE(reset_at,updated_at) AS reset_at,total_rx,total_tx,reset_rx,reset_tx FROM usage_state WHERE interface=?', (interface,)).fetchone()
             if state is None:
                 return jsonify({'error': 'Usage database is not initialized'}), 500
             start = datetime.fromisoformat(state['reset_at']).timestamp() if seconds == 0 else now - seconds
