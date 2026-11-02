@@ -231,7 +231,6 @@ def status():
             months = con.execute('SELECT month_key,rx_bytes,tx_bytes FROM usage_monthly WHERE interface=? ORDER BY month_key DESC LIMIT 12', (interface,)).fetchall()
     if row is None:
         return jsonify({'error': 'Usage database is not initialized'}), 500
-    with connect() as con: appearance = read_appearance(con)
     month_key = local_now().strftime('%Y-%m')
     month_rx, month_tx = (int(row['month_rx']), int(row['month_tx'])) if row['month_key'] == month_key else (0, 0)
     return jsonify({'interface': interface, 'display_name': DISPLAY_NAME,
@@ -240,7 +239,7 @@ def status():
         'upload_since_reset': max(0, int(row['total_tx']) - int(row['reset_tx'])),
         'download_total': int(row['total_rx']), 'upload_total': int(row['total_tx']),
         'download_month': month_rx, 'upload_month': month_tx, 'month': month_key,
-        'updated_at': row['updated_at'], 'monthly_history': [dict(m) for m in months], 'appearance': appearance})
+        'updated_at': row['updated_at'], 'monthly_history': [dict(m) for m in months]})
 
 
 @APP.post('/api/reset/<direction>')
