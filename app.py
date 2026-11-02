@@ -56,6 +56,8 @@ def read_interface_counters(interface=None):
 def connect():
     os.makedirs(DATA_DIR, exist_ok=True)
     con = sqlite3.connect(DB_PATH, timeout=10)
+    con.execute('PRAGMA busy_timeout=10000')
+    con.execute('PRAGMA synchronous=NORMAL')
     con.row_factory = sqlite3.Row
     try:
         yield con
@@ -69,6 +71,11 @@ def connect():
 
 def init_db():
     global ACTIVE_INTERFACE, DISPLAY_NAME
+    os.makedirs(DATA_DIR, exist_ok=True)
+    # WAL improves reader/writer concurrency for the dashboard and sampler.
+    with sqlite3.connect(DB_PATH, timeout=10) as bootstrap:
+        bootstrap.execute('PRAGMA journal_mode=WAL')
+        bootstrap.execute('PRAGMA busy_timeout=10000')
     with connect() as con:
         con.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)''')
         con.execute('''CREATE TABLE IF NOT EXISTS usage_state (
@@ -167,16 +174,43 @@ def sample_once():
                 ON CONFLICT(interface,date_key) DO UPDATE SET rx_bytes=rx_bytes+excluded.rx_bytes,
                 tx_bytes=tx_bytes+excluded.tx_bytes''',
                 (interface, now.strftime('%Y-%m-%d'), max(0, drx), max(0, dtx)))
-            daily_cutoff = (now.date() - timedelta(days=400)).strftime('%Y-%m-%d')
-            con.execute('DELETE FROM usage_daily WHERE interface=? AND date_key<?', (interface, daily_cutoff))
-            con.execute('DELETE FROM usage_samples WHERE interface=? AND timestamp<?',
-                        (interface, now.timestamp() - 7 * 86400))
+            # Retention cleanup is intentionally handled by cleanup_history(), not
+            # on every sample, to reduce SQLite writes on Raspberry Pi SD cards.
+
+
+def cleanup_history():
+    """Prune old high-resolution samples and long-term aggregates periodically."""
+    now = local_now()
+    sample_cutoff = now.timestamp() - 7 * 86400
+    daily_cutoff = (now.date() - timedelta(days=400)).strftime('%Y-%m-%d')
+    monthly_cutoff = (now.date().replace(day=1) - timedelta(days=5 * 365)).strftime('%Y-%m')
+    with LOCK:
+        with connect() as con:
+            con.execute('DELETE FROM usage_samples WHERE timestamp<?', (sample_cutoff,))
+            con.execute('DELETE FROM usage_daily WHERE date_key<?', (daily_cutoff,))
+            con.execute('DELETE FROM usage_monthly WHERE month_key<?', (monthly_cutoff,))
 
 
 def sampler():
+    # Schedule against monotonic time so processing delays do not accumulate drift.
+    next_sample = time.monotonic()
+    last_cleanup = 0.0
     while True:
         sample_once()
-        time.sleep(POLL_SECONDS)
+        now_mono = time.monotonic()
+        if now_mono - last_cleanup >= 6 * 60 * 60:
+            try:
+                cleanup_history()
+                last_cleanup = now_mono
+            except Exception:
+                APP.logger.exception('History cleanup failed')
+        next_sample += POLL_SECONDS
+        delay = next_sample - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            # If the process was paused or overloaded, avoid a burst of catch-up writes.
+            next_sample = time.monotonic()
 
 
 @APP.get('/')
